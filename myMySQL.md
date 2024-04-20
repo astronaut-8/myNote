@@ -1524,9 +1524,712 @@ count(1)；#遍历整张表，但不取值，服务层对于返回的每一行�
 
 ## 2.4视图/存储过程/触发器
 
+### 2.4.1视图
 
+#### 2.4.1.1简介
+
+**视图(view) 是一种虚拟存在的表。视图中的数据并不在数据库中实际存在，行和列数据来自定义视图的查询中使用的表(基表)，并且是在使用视图时动态生成的**
+
+视图只保存了查询的SQL逻辑，不保存查询结果。所以我们在创建视图的时候，主要的工作就落在创建这条SQL查询语句上
+
+#### 2.4.1.2基本语法
+
+**创建**
+
+```sql
+create [or replace] view 视图名称[(列表名称)] as select语句 [with[cascaded | local] check option]
+create or replace view stu_v_1 as select id,name from student where id <= 1;
+```
+
+![截屏2024-04-19 20.24.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-19%2020.24.29.png)
+
+**查询**
+
+```sql
+#查看创建视图语句，默认参数也会显示
+show create view 视图名称;
+
+#查看视图数据
+select * from 视图名称 条件;
+```
+
+**修改**
+
+```sql
+create [or replace] view 视图名称[(列名列表)] as select语句 [with[cascaded | local] check option]
+
+alter view 视图名称[(列名列表)] as select语句 [with[cascaded | local] check option]
+```
+
+**删除**
+
+```sql
+drop view [if exists] 视图名称 [,视图名称] ...;
+```
+
+#### 2.4.1.3检查选项(cascaded)
+
+如图，视图创建的时候限制的条件是 id <= 20
+
+当想视图'插入'一条id为30的数据的时候，再去select*，视图返回的结果找不到这个记录,虽然基表已经添加了这个记录
+
+![截屏2024-04-19 20.38.09](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-19%2020.38.09.png)
+
+```sql
+create or replace view account_v as select id,name from account where id  <= 20
+with cascaded check option ;#会检查数据插入
+```
+
+![截屏2024-04-19 20.42.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-19%2020.42.57.png)
+
+
+
+当使用**with check option**字句创建视图时，MySQL会通过视图检查正在更改的每个行，例如 插入，更新，删除，**以使其符合视图的定义**。MySQL允许基于另一个视图创建视图，他还会**检查依赖视图中的规则以保持一致性**。为了确定检查的范围，mysql提供了两个选项：
+
+cascaded 和 local **默认值为cascaded**
+
+cascaded -- v1是一个视图，存在约束条件，**v2是根据v1创建的视图**，当选择cascaded，v2在检查自己的条件的同时还会使得条件满足v1的条件
+
+承上，若v3是根据v2创建的，但是没有加**with cascaded check option**，不会检查自己的条件，但是会满足v2的(包括v2自己关联v1)的条件(加**with cascaded check option**满足所有继承关系的条件，不管父级视图是否检查)
+
+#### 2.4.1.4检查选项(local)
+
+v2 继承自 v1，当v2家了local检查选项的时候，会检查自己的条件，**当v1也设置了检查条件才检查条件**，不然不检查
+
+![截屏2024-04-20 16.04.07](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2016.04.07.png)
+
+#### 2.4.1.5跟新及作用
+
+要使视图可跟新，视图中的行与基础表中的行必须存在一对一的关系，**如果视图包含以下任何一项，都不可跟新**
+
+- 聚合函数或窗口函数(sum,min,max,count)
+- distinct
+- group by
+- having
+- union , union all
+
+
+
+**视图的作用**
+
+- **简单**- 视图不仅可以简化用户对数据的理解，也可以简化他们的操作，那些被经常使用的查询可以被定义为视图，从而使得用户不必为以后的操作每次指定全部的条件
+- **安全** - 数据库可以授权，但不能授权到数据库特定的行和特定的列上，通过视图用户只能查询和修改他们所能见到的数据
+- **数据独立** - 视图可以帮助用户屏蔽真实表结构变化带来的影响（比如数据库里的一个字段名变了，为了不影响视图使用，只需要replace视图，给字段起个别名，这样子相当于完全没变）
+
+#### 2.4.1.6案例
+
+```sql
+#为了保证数据库表的安全性，开发人员在操作tb_user表时，只能看到的用户的基本字段，屏蔽手机号和邮箱两个字段
+create or replace view tb_user_view as select id,name,profession,age,gender,status,create_time from tb_user;
+
+#查询每个学生所选修的课程(三表联查)，这个功能在很多的业务中都有使用，为了简化操作，定义一个视图(注意避免重复字段)
+create or replace view tb_stu_cource_view as select s.name stu_name,s.no stu_no,c.name cou_name from student s,student_cource sc ,cource c where s.id = sc.studentid and sc.courceid = c.id;
+```
+
+### 2.4.2存储过程
+
+#### 2.4.2.1简介
+
+**存储过程是事先经过编译并存储在数据库中的一段SQL语句的集合，调用存储过程可以简化应用开发人员的很多工作，减少数据在数据库和应用服务器之间的传输，对于提高数据处理的效率是有好处的**
+
+**存储过程思想上很简单，就是数据库SQL语言层面的代码封装与重用**
+
+
+
+**特点**
+
+- 封装，复用
+- 可以接受参数，也可以返回数据
+- 减少网络交互，效率提升
+
+#### **2.4.2.2基本语法**
+
+```sql
+#创建
+create procedure 存储过程名称([参数列表])
+begin
+ 		--sql语句
+end;
+
+#------------------------------------
+
+#调用
+call 名称([参数]);
+
+
+#------------------------------------
+
+#查看,查询指定数据库的存储过程及状态信息
+select * from information_schema.ROUTINES where ROUTINE_SCHEMA = 'xxx';
+#查询某个存储过程的定义
+show create procedure 存储过程名称;
+
+#------------------------------------
+
+#删除
+drop procedure [if exists] 存储过程名称;
+```
+
+```sql
+create procedure p1()
+begin
+    select * from account;
+end;
+
+call p1();
+
+select * from information_schema.ROUTINES  where ROUTINE_SCHEMA = 'db1';
+```
+
+
+
+当在命令行中使用创建语法会出问题，因为begin和end中间的语句结束存在';',会认为语句结束了，不符合创建语法
+
+所以在命令行中，执行创建存储过程的sql时，**需要通过关键字delimiter指定sql语句的结束符**
+
+![截屏2024-04-20 16.42.32](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2016.42.32.png)
+
+![截屏2024-04-20 16.44.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2016.44.29.png)
+
+#### 2.4.2.3变量
+
+##### 2.4.2.3.1系统变量
+
+**系统变量是MySQL提供，不是用户定义的，属于服务器层面，分为全局变量(global),会话变量(session)**
+
+```sql
+#查看系统变量
+show [session | global] variables; --查看所有系统变量
+show [session | global] variables like '....'; --通过like模糊查找
+select @@[session | global] 系统变量名; --查看指定系统变量 #select @@global.autocommit;
+```
+
+```sql
+#设置系统变量
+set [global | session] 系统变量名 = 值;
+set @@[session | global]系统变量名 = 值;
+```
+
+**全局系统变量当mysql服务器重启后，还是会变成初始的默认值，想要更改这个默认值，需要到mysql的配置文件修改**
+
+##### 2.4.2.3.2用户定义变量
+
+**用户自定义变量**是用户根据需要自己定义的变量，用户变量不用提前声明，在用的时候直接用<u>@变量名</u>使用就可以。其作用域为当前连接
+
+```sql
+#赋值
+set @var_name = expr [, @var_name = expr]...;
+set @var_name := expr [,@var_name := expr]...;
+
+select @var_name := expr [, @var_name = expr]...;
+select 字段名 into @var_name from 表名;
+```
+
+```sql
+#使用
+select @var_name;
+```
+
+```sql
+set @my_name = 'account';
+set @my_age := 10;#推荐，可以区别于 '==',因为sql的判断相等为=
+
+set @my_name := 'account',@my_hobby = 'java';
+
+select count(*) into @my_count from account;
+
+select @my_age,@my_hobby;
+```
+
+**用户定义的变量无需对其进行声明或初始化，只不过获取到的值为null**
+
+##### 2.4.2.3.3局部变量
+
+**局部变量是根据需要定义在局部生效的变量，访问之前，需要declare声明。可用作存储过程内的局部变量和输入参数，局部变量的范围是在其内声明的begin ... end块**
+
+```sql
+#声明
+declare 变量名 变量类型 [default ... ]; #数据类型就是数据库字段类型
+```
+
+```sql
+#赋值
+set 变量名 = 值
+set 变量名 := 值
+select 字段名 into 变量名 from 表名 ...;
+```
+
+```sql
+create procedure p3()
+
+begin
+    declare acc_count int default 0;
+
+    select count(*) into acc_count from account;
+    select acc_count;
+end;
+```
+
+#### 2.4.2.4If判断
+
+```sql
+if 条件1 then
+	。。。
+elseif 条件2 then
+	。。。
+else
+  。。。
+end if；
+```
+
+```java
+create procedure p4()
+
+begin
+    declare score int default 58;
+    declare result varchar(10);
+    if score >= 85 then
+        set result := '优秀';
+    elseif score >= 60 then
+        set result = '及格';
+    else
+        set result = '不及格';
+    end if;
+    select result;
+end;
+
+call p4();
+```
+
+#### 2.4.2.5参数
+
+| 类型  | 含义                                         | 备注 |
+| ----- | -------------------------------------------- | ---- |
+| in    | 该类参数作为输入，也就是需要调用时传入值     | 默认 |
+| out   | 该类参数作为输出，也就是该参数可以作为返回值 |      |
+| inout | 既可以作为输入参数，也可以作为输出参数       |      |
+
+```sql
+create procedure 存储过程名称([in/out/inout 参数名 参数类型])
+begin
+  --sql语句
+end;
+```
+
+```sql
+create procedure p4()
+
+begin
+    declare score int default 58;
+    declare result varchar(10);
+    if score >= 85 then
+        set result := '优秀';
+    elseif score >= 60 then
+        set result = '及格';
+    else
+        set result = '不及格';
+    end if;
+    select result;
+end;
+
+call p4();
+```
+
+```sql
+create procedure p6(inout score double)
+begin
+    set score := score * 0.5;
+end;
+
+set @score = 178;
+call p6(@score);
+select @score;
+```
+
+#### 2.4.2.6case
+
+```sql
+CASE case_value
+	when when_value1 then statement_list1
+	[when when_value2 then statement_list2]...
+	[else statement_list]
+end CASE;
+```
+
+```sql
+case
+	when search_condition1 then statement_list1
+	[when search_condition2 then statement_list2]...
+	[else statement_list]
+end case;
+```
+
+```sql
+create procedure p7(in month int)
+begin
+    declare result varchar(10);
+    case
+        when month >= 1 and month <= 3 then
+            set result := '第一季度';
+        when month >4 and month <= 6 then
+            set result := '第二季度';
+        when month >=7 and month <= 9 then
+            set result := '第三季度';
+        when month >= 10 and month <= 12 then
+            set result := '第四季度';
+        else
+            set result := '非法参数';
+    end case ;
+
+    select concat(month,'月，为',result);
+end;
+
+call p7(3);
+```
+
+#### 2.4.2.7循环结构
+
+##### 2.4.2.7.1while循环
+
+```sql
+#先判定条件，如果条件为true，则执行逻辑，否则，不执行逻辑
+while 条件 do
+	sql逻辑...
+end while;
+```
+
+```sql
+create procedure p8(in n int)
+begin
+
+    declare res int default 0;
+    while n > 0 do
+        set res := n + res;
+        set n := n -1;
+    end while;
+    select res;
+end;
+
+call p8(100);
+```
+
+##### 2.4.2.7.2repeat循环
+
+```sql
+#先执行一次逻辑，然后判定逻辑是否满足，如果满足，则退出。如果不满足，则继续下一次循环
+repeat
+	sql逻辑...
+	until 条件
+end repeat;
+```
+
+```sql
+create procedure p9(in n int)
+begin
+
+    declare res int default 0;
+    repeat
+        set res := res + n;
+        set n = n -1;
+    until n <= 0
+    end repeat;
+    select res;
+end;
+
+call p9(100);
+```
+
+##### 2.4.2.7.3loop循环
+
+LOOP实现简单的循环，如果不在SQL逻辑中增加退出循环的条件，可以用其来实现简单的死循环。LOOP可以配合一下两个语句使用:
+
+- **LEAVE**  -  配合循环使用，退出循环
+- **ITERATE**  -  必须用在循环中，作用是跳过当前循环剩下的语句，直接进入下一次循环
+
+```sql
+[begin_label:] LOOP
+	sql逻辑...
+end loop [end_label];
+```
+
+```sql
+#label为循环标记
+leave lable; -- 退出循环
+iterate label; -- 直接进去下一次循环
+```
+
+```sql
+create procedure p10(in n int)
+begin
+    declare res int default 0;
+    sum:loop
+        set res := res + n;
+        set n = n -1;
+        if n <= 0 then
+            leave sum;
+        end if;
+    end loop sum;
+    select res;
+end;
+
+call p10(100);
+```
+
+```sql
+create procedure p11(in n int)
+begin
+    declare res int default 0;
+    sum:loop
+        if n % 2 = 1 then
+            set n = n -1;
+            iterate sum;
+        end if;
+        set res := res + n;
+        set n = n -1;
+        if n <= 0 then
+            leave sum;
+        end if;
+    end loop sum;
+    select res;
+end;
+
+call p11(100);
+```
+
+#### 2.4.2.8游标
+
+游标是用来**存储查询结果集的数据类型**，在存储过程和函数中可以使用游标**对结果集进行循环的处理**。游标的使用包括游标的**声明，open，fetch，close**
+
+```sql
+#声明游标
+declare 游标名称 cursor for 查询语句；
+
+#打开游标
+open 游标名称；
+
+#获取游标记录
+fetch 游标名称 into 变量[,变量];
+
+#关闭游标
+close 游标名称;
+```
+
+#### 2.4.2.9条件处理程序
+
+**条件处理程序(Handler)可以用来定义在流程控制结构执行过程中遇到问题时相应的处理步骤**
+
+```sql
+declare handler_action handler for condition_value [,condition_value] ... statement;
+
+handler_action
+	continue:继续执行当前程序
+	exit:终止执行当前程序
+condition_value
+	sqlstate sqlstate_value : 状态码,如02000
+	sqlwarning : 所有以01开头的sqlstate代码的简写
+	not found : 所有以02开头的sqlstate代码的简写
+	sqlexception :  所有没有被sqlwarning 或not found 捕获的sqlstate代码的简写
+```
+
+```sql
+#根据传入的参数uage，查询用户表tb_user中所有用户年龄小于uage的用户name，profession，
+#并根据用户的姓名和专业插入到所创建的一张新表(id,name,profession)中
+create procedure p12(in uage int)
+begin
+    declare uname varchar(100);
+    declare upro varchar(100);#先声明普通变量，再声明游标
+    declare u_cursor cursor for select name,profession from tb_user where age <= uage;
+    #declare exit handler for not found close u_cursor;
+    declare exit handler for sqlstate '02000' close u_cursor;#当满足sql状态码为02000时触发条件处理器，并关闭游标
+    
+    drop table if exists tb_user_pro;
+    create table if not exists tb_user_pro(
+        id int primary key auto_increment,
+        name varchar(20),
+        profession varchar(20)
+    );
+    open u_cursor;
+    while true do
+        fetch u_cursor into uname,upro;
+        insert into tb_user_pro values (null,uname,upro);
+    end while;#死循环无法结束，在游标内数据被遍历完之后会出现02000的sql错误状态码
+    close u_cursor;
+end;
+```
+
+### 2.4.3存储函数
+
+**存储函数是有返回值的<u>存储类型</u>，存储函数的参数只能是in类型的**
+
+```sql
+create function 存储函数名称([参数列表])
+returns type [characteristic ... ]
+begin
+	--sql语句
+	return ...;
+end;
+
+characteristic说明:
+1 - deterministic : 相同的输入参数总是产生相同的结果
+2 - no sql :不包含sql语句
+3 - reads sql data ： 包含读取数据的语句，但不包含写入数据的语句
+```
+
+```sql
+-- 存储函数
+create function fun1(n int)
+returns int deterministic
+begin
+    declare total int default 0;
+    while n > 0 do
+        set total := total + n;
+        set n = n -1;
+    end while;
+
+    return total;
+end;
+
+select fun1(100);
+```
+
+**必须有返回值，这玩意用的比较少**
+
+### 2.4.4触发器
+
+#### 2.4.4.1简介
+
+**触发器是与表有关的数据库对象，指在insert/update/delete之前或之后，触发并执行触发器中定义的sql语句集合。触发器的这种特性可以协助应用在数据库端确保数据的完整性，日志记录，数据校验等操作。**
+
+**使用别名OLD和NEW来引用触发器中发生变化的记录内容，这与其他的数据库是相似的。现在触发器还只支持行级触发，不支持语句级触发(比如一次update影响了5行，触发器触发5次，这是行级触发器，对于语句级触发器，一次update不管影响几行，之后触发一次触发器)**
+
+| 触发器类型     | NEW和OLD                                               |
+| -------------- | ------------------------------------------------------ |
+| INSERT型触发器 | NEW表示将要或者已经新增的数据                          |
+| UPDATE型触发器 | OLD表示修改之前的数据，NEW表示将要或者已经修改后的数据 |
+| DELETE型触发器 | OLD表示将要或者已经删除的数据                          |
+
+#### 2.4.4.2语法
+
+```sql
+#创建
+create trigger trigger_name
+before/after insert/update/delete
+on table_name for each row -- 行级触发器
+begin
+	trigger_stmt;
+end;
+
+#查看
+show triggers;
+
+#删除
+drop trigger [schema_name.]trigger_name; -- 如果没有指定schema_name，默认为当前数据库
+```
+
+#### 2.4.4.3insert案例
+
+![截屏2024-04-20 20.12.38](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2020.12.38.png)
+
+```sql
+create table user_logs(
+    id int(11) not null auto_increment primary key ,
+    operation varchar(20) not null comment '操作类型,insert/update/delete',
+    operation_time datetime not null comment '操作时间',
+    operation_id int(11) not null comment '操作ID',
+    operation_params varchar(500) comment '操作参数'
+)engine=innodb default  charset = utf8;
+```
+
+
+
+```sql
+create trigger tb_user_insert_trigger
+    after insert on tb_user for each row
+begin
+    insert into user_logs(id, operation, operation_time, operation_id, operation_params) VALUES
+    (null,'insert',now(),new.id,concat('插入的数据内容',new.id,new.name));
+end;
+```
+
+#### 2.4.4.4update案例
+
+```sql
+create trigger tb_user_update_trigger
+    after update on tb_user for each row
+begin
+    insert into user_logs(id, operation, operation_time, operation_id, operation_params) VALUES
+        (null,'update',now(),new.id,concat('跟新前数据内容',old.name,'跟新后的数据',new.name));
+end;
+```
+
+#### 2.4.4.5delete案例
+
+```sql
+create trigger tb_user_delete_trigger
+    after delete on tb_user for each row
+begin
+    insert into user_logs(id, operation, operation_time, operation_id, operation_params) VALUES
+        (null,'delete',now(),old.id,concat('删除的数据为',old.name));
+end;
+```
 
 ## 2.5锁
+
+### 2.5.1概述
+
+**锁是计算机协调多个进程或线程并发访问某一资源的机制。在数据库中，除传统的计算机资源(CPU,RAM,I/O)的争用以外，数据也是一种供许多用户共享的资源，如何保证数据并发访问的一致性,有效性是所有数据库必须解决的一个问题，锁冲突也是影响数据库并发访问性能的一个重要因素。从这个角度来说，锁对数据库而言显得尤其重要，也更加复杂。**
+
+### 2.5.2全局锁
+
+**全局锁就是对整个数据库实例加锁，加锁后整个实例就处于只读状态，后续的DML的写语句，DDL语句，以及跟新操作的事物提交语句都将被阻塞。**
+
+**其典型的使用场景是做全库的逻辑备份，对所有的表进行锁地，从而获取一致性视图，保证数据的完整性**
+
+![截屏2024-04-20 20.49.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2020.49.48.png)
+
+![截屏2024-04-20 20.51.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2020.51.03.png)
+
+```sql
+#加锁
+flush tables with read lock;
+
+#逻辑备份
+mysqldump [-h -P]-u root -p 137321Aa account > D://account.sql #windows操作，不是mysql的操作
+
+#解锁
+unlock tables;
+```
+
+
+
+**问题**
+
+- 如果在主库上备份，那么在备份期间都不能执行跟新，业务基本就得停摆
+- 如果在从库备份，那么在备份期间从库不能执行主库同步过来的二进制日志(binlog)，会导致主从延迟
+
+
+
+**在InnoDB引擎中，我们可以在备份时加上参数 --single-transaction参数来完成不加速的一致性数据备份**
+
+```
+mysqldump --single-transaction -u root -p 137321Aa account > D://account.sql #windows操作，不是mysql的操作
+```
+
+![截屏2024-04-20 21.00.47](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-20%2021.00.47.png)
+
+### 2.5.3表级锁
+
+
+
+
+
+
+
+### 2.5.4行级锁
+
+
+
+
 
 
 
