@@ -1,5 +1,7 @@
 # MySQL基础
 
+**远程连接3步骤 开放端口 用户权限 bind地址(mysqld.cnf)**
+
 ![image-20221230150720513](https://typora---------image.oss-cn-beijing.aliyuncs.com/image-20221230150720513.png)
 
 ## MySQL概述
@@ -2205,7 +2207,7 @@ unlock tables;
 **问题**
 
 - 如果在主库上备份，那么在备份期间都不能执行跟新，业务基本就得停摆
-- 如果在从库备份，那么在备份期间从库不能执行主库同步过来的二进制日志(binlog)，会导致主从延迟
+- 如果在从库备份，那么在备份期间从库不能执行主库同步过来的二进制日志(binlog)，会导致**主从延迟**
 
 
 
@@ -2219,22 +2221,917 @@ mysqldump --single-transaction -u root -p 137321Aa account > D://account.sql #wi
 
 ### 2.5.3表级锁
 
+**表级锁，每次操作锁住整张表，锁定粒度大，发生锁冲突的概率最高，并发度最低，应用在MyISAM，InnoDB，BDB等存储引擎中**
+
+#### 2.5.3.1表锁
+
+##### **2.5.3.1.1表共享读锁**
+
+(read lock)
+
+**加了表锁后，表还可以读，加表锁的会话窗口不能再执行加入操作，别的会话窗口进行写入操作会进入堵塞状态**
+
+**知道加锁的那边释放锁后，加入操作才会继续执行**
+
+##### 2.5.3.1.2**表独占写锁**
+
+(write lock)
+
+一个客户端对表加了写锁后，可以进行读写，但别的客户端就不能读写，会进入阻塞状态
+
+```sql
+#加锁
+lock tables 表名 ... read / write
+
+#释放锁
+unlock tables /客户端断开连接
+```
+
+#### 2.5.3.2元数据锁
+
+(meta data lock.MDL)
+
+**MDL加锁过程是系统自动控制，无需显示使用，在访问一张表的时候会自动加上。MDL锁的主要作用是维护表元数据(表结构)的数据一致性在表上有活动事物的时候，不可以对元数据进行写入操作**
+
+----避免DML和DDL冲突，保证读写的正确性
+
+**当对一张表进行增删改查的时候，加MDL读锁(共享);当对表结构进行变更操作的时候，加MDL写锁(排他)**
+
+![截屏2024-04-22 13.02.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.02.16.png)
+
+![截屏2024-04-22 13.05.06](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.05.06.png)
+
+```sql
+#查看元数据锁
+select object_type,object_schema,object_name,lock_type,lock_duration from performance_schema.metadata_locks;
+```
+
+![截屏2024-04-22 13.32.19](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.32.19.png)
+
+#### 2.5.3.3意向锁
+
+**为了避免DML在执行时，加的行锁与表锁的冲突，在InnoDB中加入了意向锁，使得表锁不用检查每行数据是否加锁，使用意向锁来减少表锁的检查**
+
+事物A开启，修改一行数据，为那一行数据加入了行锁，并加入意向锁，表锁在添加的时候，检查是否有意向锁，以及要加的表锁是否和意向锁冲突(兼容直接加，不兼容就进入阻塞状态)
 
 
 
+1 - 意向共享锁(IS) - 由语句select ... lock in share mode 添加
 
+2 - 意向排他锁(IX) - 由insert, update,delete,select ... for update添加
 
+- 意向共享锁(IS) 与表锁共享锁(read)兼容，与表锁排他锁(write)互斥
+- 意向排他锁(IX) 与表锁共享锁(read)和排他锁都互斥。意向锁之间不会互斥
+
+```sql
+#查看意向锁及行锁的加锁情况
+select object_schema,object_name,index_name,lock_type,lock_mode,lock_data from performance_schema.data_locks;
+```
+
+```sql
+#加锁
+select ....... lock in share mode;
+```
 
 ### 2.5.4行级锁
 
+**行级锁，每次操作锁住对应的行数据，锁定粒度最小，发生锁冲突的概率最低，并发度最高。应用在InnoDB存储引擎中**
+
+InnoDB的数据是基于索引组织的，行锁是通过**对索引上的索引项加锁来实现的**，而不是对记录加的锁，对于行级锁，主要分为以下三类
+
+#### 2.5.4.1行锁
+
+(Record Lock) - 锁定单个记录的锁，防止其他事物对此进行update和delete,在RC，RR隔离级别下都支持
+
+![截屏2024-04-22 13.44.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.44.25.png)
+
+![截屏2024-04-22 13.45.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.45.35.png)
+
+事物A获取共享锁后，事物B还可以获取共享锁，但不能获取排他锁
+
+事物A获取排他后，事物B就不能再获取共享锁和排他锁了
+
+![截屏2024-04-22 13.47.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.47.13.png)
+
+![截屏2024-04-22 13.48.33](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2013.48.33.png)
 
 
 
+#### 2.5.4.2间隙锁
 
+(Gap Lock) - 锁定索引记录间隙(不含改记录)，确保索引记录间隙不变，防止其他事物在这个间隙进行insert，产生幻读。在RR隔离级别下都支持
 
+![截屏2024-04-22 14.11.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.11.48.png)
+
+![截屏2024-04-22 14.14.22](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.14.22.png)
+
+#### 2.5.4.3临键锁
+
+(Next-Key Lock) - **行锁和间隙锁的组合**，同时锁住数据，并锁住数据前面的gap，在RR级别下支持
+
+![截屏2024-04-22 14.22.34](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.22.34.png)
 
 ## 2.6InnoDB引擎
 
+### 2.6.1逻辑存储结构
 
+![截屏2024-04-22 14.28.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.28.53.png)
+
+- **表空间** - ibd文件，一个mysql实例可以对应多个表空间，用于存储记录，索引等数据
+- **段** - 分为数据段(leaf node segment),索引段(non-leaf node segment),回滚段(Rollback segment),**InnoDB是索引组织表**，数据段就是B+树段叶子节点，索引段即为B+树段非叶子节点。段用来管理多个Extent
+- **区** - 表空间的单元结构，**每个区的大小为1M**，默认情况下，**InnoDB存储引擎页大小为16K**，即一个区中**一共有64个连续的页**
+- **页** - 是InnoDB存储引擎磁盘管理的最小单元，每个页的大小默认为16KB，**为了保证页的连续性**，InnoDB存储引擎每次从磁盘申请**4-5个区**
+- **行** - InnoDB存储引擎数据是**按行进行存放的**
+
+![截屏2024-04-22 14.36.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.36.44.png)
+
+### 2.6.2架构
+
+**左侧为内存结构图，右侧为磁盘结构**
+
+![截屏2024-04-22 14.37.52](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.37.52.png)
+
+#### 2.6.2.1内存结构
+
+##### 2.6.2.1.1缓冲池
+
+![截屏2024-04-22 14.41.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.41.08.png)
+
+**增删改操作先把数据缓存到缓存区(如果缓存区没有数据的话)，避免每次进行磁盘IO，之后统一或者是在触发了某一机制后才进行统一的IO读写**
+
+##### 2.6.2.1.2更改缓冲区
+
+![截屏2024-04-22 14.45.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.45.00.png)
+
+![截屏2024-04-22 14.45.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.45.57.png)
+
+**非唯一的二级索引随机性很大，将很多次操作缓存在更改缓冲区，后面统一一次合并恢复到缓冲池，就可以统一进行IO**
+
+##### 2.6.2.1.3自适应hash索引
+
+(hash只适合等值匹配，不适合范围查询)
+
+**自适应hash索引，用于优化对Buffer Pool数据的查询。InnoDB存储引擎会监控对表上各索引页的查询，如果观察到hash索引可以提升速度，则建立hash索引**
+
+**无序人工干预，系统根据情况自动完成**
+
+参数: adaptive_hash_index
+
+![截屏2024-04-22 14.52.34](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.52.34.png)
+
+##### 2.6.2.1.4日志缓冲区
+
+![截屏2024-04-22 14.53.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.53.30.png)
+
+![截屏2024-04-22 14.54.21](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.54.21.png)
+
+| 时机 | 解读                                           |
+| ---- | ---------------------------------------------- |
+| 0    | 每秒将日志写入并刷新到磁盘一次                 |
+| 1    | 日志在每次事物提交时写入并刷新到磁盘           |
+| 2    | 日志在每次事物提交后写入，并每秒刷新到磁盘一次 |
+
+#### 2.6.2.2磁盘结构
+
+![截屏2024-04-22 14.58.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2014.58.03.png)
+
+##### 2.6.2.2.1System Tablespace
+
+系统表空间是更改缓冲区的存储区域。如果表是在系统表空间而不是每个表文件或通用空间中创建的，他也有可能包含表和索引数据
+
+(mysql 5.x 版本中还包含InnoDB数据字典，undolog等)
+
+**参数 - innodb_data_file_path**
+
+![截屏2024-04-22 15.01.24](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.01.24.png)
+
+
+
+##### 2.6.2.2.2FIle-Per-Table Tablespaces
+
+**每个表的文件表空间包含单个InnoDB表的数据和索引，并存储在文件系统上的单个数据文件中**
+
+**参数 - innodb_file_per_table** 默认开启
+
+![截屏2024-04-22 15.04.11](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.04.11.png)
+
+##### 2.6.2.2.3General Tablespaces
+
+通用表空间，需要通过CREATE TABLESPACE 语法创建通用表空间，在创建表时，可以指定改表空间
+
+```sql
+create tablespace xxx add datafile 'file_name' engine = engine_name;
+```
+
+![截屏2024-04-22 15.08.06](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.08.06.png)
+
+自己创建，自己指定
+
+##### 2.6.2.2.4Undo Tablespaces
+
+撤销表空间
+
+MySQL实例在初始化时会自动创建两个默认的undo表空间(初始大小为16M)，用于存储undo log日志
+
+##### 2.6.2.2.5Temporary Tablespaces
+
+InnoDB使用会话临时表空间和全局临时表空间。存储用户创建的临时表等数据
+
+##### 2.6.2.2.6Doublewrite Buffer Files
+
+双写缓冲区
+
+**InnoDB引擎将数据页从Buffer Pool刷新到磁盘前，先将数据页写入双写缓冲区文件，便于系统异常时恢复数据**
+
+.dblwr
+
+##### 2.6.2.2.7Redo Log
+
+重做日志
+
+![截屏2024-04-22 15.14.28](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.14.28.png)
+
+以循环方式写入重做日志文件，涉及两个文件![截屏2024-04-22 15.15.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.15.50.png)
+
+#### 2.6.2.3后台线程
+
+**将InnoDB存储引擎缓冲池中的数据在合适的时机刷新到磁盘文件中去**
+
+![截屏2024-04-22 15.20.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.20.18.png)
+
+### 2.6.3事物原理
+
+#### 2.6.3.1概述
+
+![截屏2024-04-22 15.30.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.30.35.png)
+
+![截屏2024-04-22 15.32.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.32.27.png)
+
+![截屏2024-04-22 17.07.10](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.07.10.png)
+
+#### 2.6.3.2redolog
+
+![截屏2024-04-22 15.33.33](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.33.33.png)
+
+![截屏2024-04-22 15.36.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.36.42.png)
+
+执行增删改操作的时候，修改缓冲池中的数据(如果没有对应的数据的话，调用线程从磁盘中读取数据)，在redolog buffer中缓存变化的操作，**并跟新到磁盘中的 redo log file 重做日志文件**   如果事物提交发生错误，可以使用这个重做文件进行数据回滚（脏页刷新到磁盘发生错误的时候）
+
+WAL(write-ahead-logging)先写日志
+
+事物操作通常有很多条记录，这些记录随机操作数据页，涉及到大量的随机磁盘IO
+
+如果使用log，log日志文件是追加的，此时它为顺序磁盘IO，性能高于随机磁盘IO
+
+**事物成功提交后，这个日志也没啥用了，所以那个日志是可以循环使用的**
+
+#### 2.6.3.3undolog
+
+![截屏2024-04-22 15.45.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.45.30.png)
+
+### 2.6.4MVCC
+
+**Multi-Version Concurrency Control，多版本并发控制**
+
+#### 2.6.4.1基本概念
+
+![截屏2024-04-22 15.53.23](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.53.23.png)
+
+右侧事物提交后，左侧事物的事物隔离级别的不可重复度被解决了，所以直接select是读不到跟新后的数据的
+
+但是加了 lock in share mode后，读取最新数据
+
+![截屏2024-04-22 15.53.54](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2015.53.54.png)
+
+![截屏2024-04-22 16.34.11](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.34.11.png)
+
+#### 2.6.4.2隐藏字段
+
+![截屏2024-04-22 16.35.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.35.49.png)
+
+#### 2.6.4.3undolog版本链
+
+![截屏2024-04-22 16.40.45](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.40.45.png)
+
+![截屏2024-04-22 16.44.59](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.44.59.png)
+
+#### 2.6.4.4readview介绍
+
+**ReadView(读视图) 是 快照读 SQL执行时MVCC提取数据的依据，记录并维护系统当前活跃的事物(未提交的)id**
+
+| 字段           | 含义                                               |
+| -------------- | -------------------------------------------------- |
+| m_ids          | 当前活跃的事物ID集合                               |
+| min_trx_id     | 最小活跃事物ID                                     |
+| max_trx_id     | 预分配事物ID，当前最大事物ID+1(因为事物ID是自增的) |
+| creator_trx_id | ReadView创建者的事物ID                             |
+
+![截屏2024-04-22 16.51.45](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.51.45.png)
+
+![截屏2024-04-22 16.53.43](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2016.53.43.png)
+
+#### 2.6.4.5RC级别原理分析
+
+![截屏2024-04-22 17.00.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.00.13.png)
+
+#### 2.6.4.6RR级别原理分析
+
+![截屏2024-04-22 17.03.09](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.03.09.png)
 
 ## 2.7MySQL管理
+
+### 2.7.1系统数据库介绍
+
+![截屏2024-04-22 17.14.40](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.14.40.png)
+
+### 2.7.2常用工具
+
+#### 2.7.2.1mysql
+
+![截屏2024-04-22 17.15.23](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.15.23.png)
+
+**#主要要指定数据库**
+
+#### 2.7.2.2mysqladmin
+
+![截屏2024-04-22 17.17.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.17.30.png)
+
+![截屏2024-04-22 17.19.45](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.19.45.png)
+
+#### 2.7.2.3mysqlbinlog
+
+![截屏2024-04-22 17.21.26](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.21.26.png)
+
+#### 2.7.2.4mysqlshow
+
+![截屏2024-04-22 17.24.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.24.35.png)
+
+**参数加到字段**
+
+![截屏2024-04-22 17.26.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.26.53.png)
+
+#### 2.7.2.5mysqldump
+
+![截屏2024-04-22 17.28.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2017.28.30.png)
+
+**备份数据库**
+
+![截屏2024-04-22 18.12.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.12.55.png)
+
+**输出参数的使用**
+
+![截屏2024-04-22 18.15.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.15.05.png)
+
+**-T可变参数的使用细节**
+
+随便写一个目标地址，会报错，提示目标路径不安全，**要使用mysql认为安全(信任)的地址**
+
+![截屏2024-04-22 18.17.40](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.17.40.png)
+
+![截屏2024-04-22 18.19.02](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.19.02.png)
+
+#### 2.7.2.6mysqlimport / source
+
+![截屏2024-04-22 18.20.51](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.20.51.png)
+
+**在mysql外**
+
+![截屏2024-04-22 18.22.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.22.35.png)
+
+**在mysql内执行**
+
+![截屏2024-04-22 18.24.32](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2018.24.32.png)
+
+# 3.MySQL运维
+
+## 3.1MySQL日志
+
+### 3.1.1错误日志
+
+![截屏2024-04-22 20.20.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.20.35.png)
+
+![截屏2024-04-22 20.22.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.22.08.png)
+
+**实时查看文件尾部信息(做日志跟踪)**
+
+![截屏2024-04-22 20.26.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.26.27.png)
+
+### 3.1.2二进制日志
+
+![截屏2024-04-22 20.28.01](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.28.01.png)
+
+**日志文件后缀自增**
+
+![截屏2024-04-22 20.32.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.32.50.png)
+
+![截屏2024-04-22 20.33.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.33.44.png)
+
+
+
+**在配置文件中修改日志格式**
+
+
+
+![截屏2024-04-22 20.33.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.33.57.png)
+
+
+
+**row 记录update操作的数据行，每一个update之前怎么样，之后怎么样**
+
+
+
+**查看二进制日志文件**
+
+![截屏2024-04-22 20.36.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.36.44.png)
+
+**行日志要加v才能看见sql语句！**
+
+
+
+**日志删除**
+
+![截屏2024-04-22 20.40.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.40.53.png)
+
+![截屏2024-04-22 20.42.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.42.25.png)
+
+默认30天自动删除
+
+![截屏2024-04-22 20.42.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.42.41.png)
+
+### 3.1.3查询日志
+
+![截屏2024-04-22 20.43.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.43.36.png)
+
+![截屏2024-04-22 20.44.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.44.18.png)
+
+### 3.1.4慢查询日志
+
+![截屏2024-04-22 20.46.37](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.46.37.png)
+
+
+
+![截屏2024-04-22 20.49.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.49.08.png)
+
+## 3.2MySQL主从复制
+
+### 3.2.1概述
+
+![截屏2024-04-22 20.52.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.52.46.png)
+
+**主库- Master**
+
+**从库- Slave**
+
+![截屏2024-04-22 20.53.31](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.53.31.png)
+
+### 3.2.2原理
+
+![截屏2024-04-22 20.55.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.55.36.png)
+
+![截屏2024-04-22 20.55.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.55.55.png)
+
+
+
+### 3.2.3搭建
+
+![截屏2024-04-22 20.57.10](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.57.10.png)
+
+
+
+#### 3.2.3.1主库配置
+
+![截屏2024-04-22 21.02.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.02.30.png)
+
+2 . 重启mysql服务器
+
+
+
+![截屏2024-04-22 21.03.58](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.03.58.png)
+
+![截屏2024-04-22 21.06.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.06.13.png)
+
+#### 3.2.3.2从库配置
+
+![截屏2024-04-22 21.07.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.07.49.png)
+
+![截屏2024-04-22 21.09.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.09.00.png)
+
+
+
+**从哪个配置文件的哪个位置开始读**
+
+![截屏2024-04-22 21.09.24](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.09.24.png)
+
+![截屏2024-04-22 21.10.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.10.18.png)
+
+![截屏2024-04-22 21.11.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.11.55.png)
+
+![截屏2024-04-22 21.12.23](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.12.23.png)
+
+**关键参数- IO_Running 和 SQL_Running**
+
+![截屏2024-04-22 21.13.11](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.13.11.png)
+
+## 3.3MySQL分库分表
+
+### 3.3.1简介
+
+#### 3.3.1.1问题分析
+
+![截屏2024-04-22 21.21.06](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.21.06.png)
+
+![截屏2024-04-22 21.22.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.22.29.png)
+
+**分库分表的中心思想都是将数据分散存储，使得单一数据库/表的数据量变小来缓解单一数据库的性能问题，从而达到提升数据库性能的目的**
+
+
+
+#### 3.3.1.2**拆分策略**
+
+![截屏2024-04-22 21.25.19](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.25.19.png)
+
+#### 3.3.1.3垂直拆分
+
+![截屏2024-04-22 21.28.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.28.29.png)
+
+#### 3.3.1.4水平拆分
+
+![截屏2024-04-22 21.30.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.30.04.png)
+
+#### 3.3.1.5实现技术
+
+![截屏2024-04-22 21.34.07](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.34.07.png)
+
+### 3.3.2Mycat概述
+
+安装jdk1.8并配置环境变量
+
+![截屏2024-04-22 21.34.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2021.34.48.png)
+
+mycat解压完后的文件目录
+
+![截屏2024-04-23 11.44.23](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2011.44.23.png)
+
+![截屏2024-04-23 11.45.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2011.45.17.png)
+
+**我的mycat压根没有mysql的连接器jar包**
+
+![截屏2024-04-23 11.49.33](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2011.49.33.png)
+
+我把jar包放上去了，**不要忘记修改权限**
+
+
+
+**概念介绍**
+
+![截屏2024-04-23 12.04.51](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.04.51.png)
+
+### 3.3.3Mycat入门
+
+#### 3.3.3.1需求
+
+![截屏2024-04-23 12.07.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.07.16.png)
+
+#### 3.3.3.2环境准备
+
+**装好mysql**
+
+**关闭防火墙或者开放端口**
+
+![截屏2024-04-23 12.08.23](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.08.23.png)
+
+#### 3.3.3.3.分片配置(schema)
+
+![截屏2024-04-23 12.11.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.11.16.png)
+
+**配置文件在mycat的conf目录下**
+
+![截屏2024-04-23 12.12.22](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.12.22.png)
+
+修改数据节点主机名字，和关联数据库
+
+![截屏2024-04-23 12.20.45](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.20.45.png)
+
+配置数据节点的 dbDriver 为java
+
+![截屏2024-04-23 12.18.47](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.18.47.png)
+
+配置数据节点的数据库连接信息![截屏2024-04-23 12.18.37](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.18.37.png)
+
+#### 3.3.3.4分片配置(server)
+
+![截屏2024-04-23 12.21.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2012.21.44.png)
+
+#### 3.3.3.5启动服务
+
+![截屏2024-04-23 13.21.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.21.03.png)
+
+#### 3.3.3.6连接mycat
+
+![截屏2024-04-23 13.25.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.25.42.png)
+
+#### 3.3.3.7分片规则rule
+
+**在rule.xml中**
+
+![截屏2024-04-23 13.30.22](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.30.22.png)
+
+这是根据id判断该存在哪个表(会有一个txt文件记录规则)
+
+algorithm也是一个引用，可以继续查看，java类
+
+如果存入的索引过大了(每个节点数据库都装到指定大小了)，需要增加节点，以可以存入更多的数据
+
+![截屏2024-04-23 13.47.20](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.47.20.png)
+
+
+
+
+
+### 3.3.4Mycat配置
+
+#### 3.3.4.1schema.xml
+
+<img src="https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.37.20.png" alt="截屏2024-04-23 13.37.20" style="zoom:50%;" />
+
+**schema标签**
+
+![截屏2024-04-23 13.37.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.37.50.png)
+
+当checkSQLschema为true
+
+**可以在不指定数据库的时候这么写，因为在执行的时候吧数据库名称去除，但是已经完成了数据库的定位**
+
+![截屏2024-04-23 13.40.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.40.16.png)
+
+![截屏2024-04-23 13.41.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.41.50.png)
+
+**dataNode标签**
+
+![截屏2024-04-23 13.44.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.44.17.png)
+
+**dataHost标签**
+
+![截屏2024-04-23 13.45.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.45.00.png)
+
+#### 3.3.4.2rule.xml
+
+![截屏2024-04-23 13.48.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.48.05.png)
+
+```
+column中为用来做判断的字段
+
+algoritm为分页函数算法
+
+函数中指定 提供分片处理的java类 和 所关联的属性配置
+```
+
+#### 3.3.4.3server.xml
+
+![截屏2024-04-23 13.51.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.51.55.png)
+
+**user标签**
+
+![截屏2024-04-23 13.53.51](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2013.53.51.png)
+
+### 3.3.5Mycat分片
+
+#### 3.3.5.1垂直拆分
+
+##### **3.3.5.1.1场景问题**
+
+![截屏2024-04-23 14.02.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.02.49.png)
+
+**配置服务器**
+
+![截屏2024-04-23 14.04.12](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.04.12.png)
+
+**配置配置文件**
+
+![截屏2024-04-23 14.05.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.05.05.png)
+
+
+
+![截屏2024-04-23 14.09.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.09.44.png)
+
+
+
+配置完配置文件，那个shopping数据库中应该是没有内容的，是逻辑表结构，因为在配置文件中申明了，需要手动创建(节点数据库也会创建)
+
+##### **3.3.5.1.2多表联查,全局表配置**
+
+**在同一个节点下的数据表多表联查不会出问题，但是如果几张表在不同的节点数据库中，多表查询会出现问题**
+
+sql底层的路由定位会出问题，不找到改找哪个节点
+
+![截屏2024-04-23 14.21.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.21.17.png)
+
+**配置**
+
+修改dataNode和type
+
+![截屏2024-04-23 14.22.07](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.22.07.png)
+
+跟新全局表（对于mycat），关联节点中的都会变
+
+#### 3.3.5.2水平拆分
+
+![截屏2024-04-23 14.27.09](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.27.09.png)
+
+**配置**
+
+水平分要指定rule了
+
+**dataNode配置中，name和database要换，但是datahost不用换**
+
+![截屏2024-04-23 14.28.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.28.17.png)
+
+![截屏2024-04-23 14.31.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.31.13.png)
+
+![截屏2024-04-23 14.31.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.31.29.png)
+
+**根据主键id求模**（因为我现在是3个节点，id % 3只会有三种情况，正好对应三个数据库）
+
+#### 3.3.5.3范围分片
+
+![截屏2024-04-23 14.41.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.41.49.png)
+
+
+
+![截屏2024-04-23 14.42.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.42.13.png)
+
+#### 3.3.5.4取模分片
+
+![截屏2024-04-23 14.44.19](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.44.19.png)
+
+![截屏2024-04-23 14.44.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.44.41.png)
+
+#### 3.3.5.5一致性hash算法
+
+![截屏2024-04-23 14.46.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.46.46.png)
+
+
+
+![截屏2024-04-23 14.46.58](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.46.58.png)
+
+**要配置count**
+
+#### 3.3.5.6枚举分片
+
+![截屏2024-04-23 14.51.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.51.08.png)
+
+这里的规则是自定义的，不使用原来的名字
+
+![截屏2024-04-23 14.51.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.51.27.png)
+
+
+
+![截屏2024-04-23 14.53.54](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2014.53.54.png)
+
+**替换column字段**
+
+**并根据设计好的字段的枚举情况修改 外部txt文件**
+
+配置默认节点。。。
+
+#### 3.3.5.7应用指定算法
+
+![截屏2024-04-23 15.00.31](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.00.31.png)
+
+![截屏2024-04-23 15.00.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.00.50.png)
+
+**这个分片规则默认没有，自己添加**
+
+#### 3.3.5.8固定hash算法
+
+**10位与1111111111运算得到的结果一定在0-1023之间**
+
+![截屏2024-04-23 15.10.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.10.25.png)
+
+**三个节点的范围可以均匀也可以不均匀**
+
+![截屏2024-04-23 15.11.32](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.11.32.png)
+
+**2 * 256 +  1* 512 = 1024(默认值)**
+
+![截屏2024-04-23 15.13.38](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.13.38.png)
+
+#### 3.3.5.9字符串hash解析
+
+​	
+
+![截屏2024-04-23 15.20.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.20.17.png)
+
+
+
+![截屏2024-04-23 15.20.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.20.41.png)
+
+![截屏2024-04-23 15.23.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.23.18.png)
+
+**这个函数需要自己定义**
+
+#### 3.3.5.10按天分片
+
+![截屏2024-04-23 15.40.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.40.03.png)
+
+![截屏2024-04-23 15.40.22](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.40.22.png)
+
+![截屏2024-04-23 15.41.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.41.16.png)
+
+#### 3.3.5.11按自然月分片
+
+**按照月份来分片，每个自然月为一个分片**
+
+
+
+**超过了指定月份，是进入循环，从头插入**
+
+![截屏2024-04-23 15.46.09](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.46.09.png)
+
+![截屏2024-04-23 15.46.37](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.46.37.png)
+
+ 如果数量不一致会报错
+
+![截屏2024-04-23 15.51.12](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2015.51.12.png)
+
+### 3.3.6Mycat管理及监控
+
+#### 3.3.6.1mycat原理
+
+![截屏2024-04-23 16.25.39](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.25.39.png)
+
+#### 3.3.6.2管理工具
+
+![截屏2024-04-23 16.28.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.28.29.png)
+
+
+
+![截屏2024-04-23 16.29.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.29.17.png)
+
+#### 3.3.6.3Mycat-eye
+
+![截屏2024-04-23 16.34.26](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.34.26.png)
+
+
+
+http://172.16.14.130:8082/mycat/
+
+![截屏2024-04-23 17.56.52](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.56.52.png)
+
+![截屏2024-04-23 17.58.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.58.36.png)
+
+## 3.4MySQL读写分离
+
+### 3.4.1介绍
+
+![截屏2024-04-23 16.47.43](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.47.43.png)
+
+#### 3.4.2一主一从
+
+**基于二进制日志**
+
+![截屏2024-04-22 20.55.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-22%2020.55.36.png)
+
+#### 3.4.3一主一从读写分离
+
+![截屏2024-04-23 16.57.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.57.05.png)
+
+读写分离中可以不指定逻辑表
+
+
+
+**balance - 负载均衡**
+
+![截屏2024-04-23 16.59.01](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2016.59.01.png)
+
+**对于一主一从 1， 3没区别**
+
+
+
+**当主节点Master宕机后，业务瘫痪，不能操作数据，只能读取数据**
+
+#### 3.4.4双主双从
+
+![截屏2024-04-23 17.09.15](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.09.15.png)
+
+![截屏2024-04-23 17.09.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.09.35.png)
+
+**搭建环境**
+
+![截屏2024-04-23 17.11.13](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.11.13.png)
+
+![截屏2024-04-23 17.14.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.14.04.png)
+
+![截屏2024-04-23 17.17.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.17.49.png)
+
+![截屏2024-04-23 17.18.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.18.48.png)
+
+![截屏2024-04-23 17.21.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.21.53.png)
+
+#### 3.4.5双主双从读写分离
+
+![截屏2024-04-23 17.26.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.26.00.png)
+
+![截屏2024-04-23 17.28.21](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-04-23%2017.28.21.png)
+
+**自动切换指的是，一个writehost没了后会不会自动换到别的writehost去**
