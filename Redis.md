@@ -3126,3 +3126,531 @@ systemctl restart redis#重启redis
 *<u>**单体redis(主从Redis) 已经能达到万级别的QPS 并且也具备很强的高可用性**</u>*
 
 *<u>**如果主从能满足业务需求的情况下，尽量不搭建Redis集群**</u>*
+
+# 4.原理篇
+
+## 4.1数据结构
+
+### 4.1.1动态字符串SDS
+
+**Redis中保存的key是字符串，value往往是字符串或者字符串的集合，可见字符串是Redis中最常用的一种数据结构**
+
+
+
+非二进制安全 - 如果字符串中包含特殊字符（\0，字符串结束标识） 则会默认在这里结束，造成错误
+
+
+
+![截屏2024-05-15 16.16.45](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.16.45.png)
+
+![截屏2024-05-15 16.22.12](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.22.12.png)
+
+
+
+![截屏2024-05-15 16.20.54](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.20.54.png)
+
+![截屏2024-05-15 16.23.37](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.23.37.png)
+
+**动态**
+
+为什么要做预分配 - 内存分配的性能消耗问题 linux分为用户空间和内核空间
+
+当我们申请内存的时候应用程序无法直接操作硬件
+
+申请内存和内核进行交互 从用户态切换到内核态
+
+**总之就是 申请内存的动作非常消耗资源** 预分配就是为了提高性能
+
+![截屏2024-05-15 16.30.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.30.53.png)
+
+### 4.1.2IntSet
+
+**IntSet是Redis中set集合的一种实现方式**
+
+**基于整数数组来实现，并且具备长度可变，有序等特性**
+
+![截屏2024-05-15 16.36.31](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.36.31.png)
+
+**为什么要去强调这个编码方式 -** 
+
+每个元素的大小一样，方便intset基于数组角标去寻址，快速定位到对应的元素
+
+c语言靠指针寻址
+
+指针8字节大小无符号整数 - 映射物理内存空间
+
+**索引从0开始的原因是其代表这个元素和起始元素的间隔元素的个数**
+
+![截屏2024-05-15 16.48.40](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.48.40.png)
+
+**intset升级**
+
+![截屏2024-05-15 16.51.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.51.57.png)
+
+**顺序 把前面的元素扩容的时候，前面元素的新位置会覆盖其原本后面的位置(因为是在连续空间内)**
+
+**倒叙是对原来的最后一个元素，在起始位置的基础上根据index算出其位子，做内存的覆盖（可能是原来的地址也可能是新的位置）**
+
+![截屏2024-05-15 16.59.43](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2016.59.43.png)
+
+![截屏2024-05-15 17.00.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.00.16.png)
+
+**底层采用二分查找方式来查询** 保持顺序
+
+![截屏2024-05-15 17.01.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.01.44.png)
+
+### 4.1.3Dict
+
+Dictionary
+
+**Redis是一个键值型(Key - Value - Pair) 的数据库**
+
+**我们可以根据键实现快速的增删改查**
+
+**键与值的映射关系是通过dict来实现的**
+
+由于可能存在哈希冲突 used的大小可能会超过size的值
+
+![截屏2024-05-15 17.08.14](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.08.14.png)
+
+**& 和对size做余数是一样的** 得到0 - size的值
+
+hash一样的新元素一定在队首(因为只需要一次操作，队尾要做一次遍历)
+
+![截屏2024-05-15 17.14.26](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.14.26.png)
+
+**字典结构**
+
+![截屏2024-05-15 17.17.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.17.48.png)
+
+**dict的扩容**
+
+![截屏2024-05-15 17.20.10](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.20.10.png)
+
+**两个后台进程 控制 dict_can_resize**
+
+**dict的收缩**
+
+![截屏2024-05-15 17.24.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.24.04.png)
+
+**rehash**
+
+![截屏2024-05-15 17.28.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.28.05.png)
+
+**渐进式**
+
+**如果数据量过大，为了不阻塞线程**
+
+![截屏2024-05-15 17.34.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.34.46.png)
+
+![截屏2024-05-15 17.35.47](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.35.47.png)
+
+### 4.1.4ZipList
+
+**ZipList是一种特殊的‘双端链表’ 由一系列特殊编码的连续内存块组成。可以在任意一端进行压入 \ 弹出操作**
+
+**并且该操作的时间复杂度为O(1)**
+
+- 尾偏移量帮助快速定位到尾节点
+- entry的大小不固定，节省内存
+
+![截屏2024-05-15 17.41.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.41.55.png)
+
+![截屏2024-05-15 17.42.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.42.08.png)
+
+**entry结构**
+
+**倒叙遍历使用previous_entry_length**
+
+![截屏2024-05-15 17.48.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.48.36.png)
+
+**encoding编码**
+
+- 字符串
+
+![截屏2024-05-15 17.52.06](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.52.06.png)
+
+总结构 - 
+
+![截屏2024-05-15 17.54.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.54.04.png)
+
+- 数字
+
+![截屏2024-05-15 17.58.06](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.58.06.png)
+
+![截屏2024-05-15 17.59.02](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-15%2017.59.02.png)
+
+**查询性能不行，要限制节点的个数**
+
+
+
+**Ziplist的连锁跟新问题**
+
+假设一个节点变化，长度超过了254，后一位记录前一位长度的previous_entry_length长度发生变化，变成了5个字节，导致后面的节点可能都有于这个扩大而也要把previous_entry_length扩大，导致连锁跟新
+
+![截屏2024-05-19 19.56.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-19%2019.56.30.png)
+
+**新增和删除都有可能发生**
+
+![截屏2024-05-19 19.57.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-19%2019.57.35.png)
+
+### 4.1.5QuickList
+
+**内存多是碎片化的，想要找到大片的连续空间很困难 ----> ZipList不能存储大量数据**
+
+![截屏2024-05-20 16.06.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.06.00.png)
+
+![截屏2024-05-20 16.07.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.07.05.png)
+
+![截屏2024-05-20 16.08.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.08.00.png)
+
+![截屏2024-05-20 16.08.11](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.08.11.png)
+
+
+
+
+
+![截屏2024-05-20 16.10.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.10.08.png)
+
+![截屏2024-05-20 16.10.55](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.10.55.png)
+
+不用指针，内存占用减少
+
+### 4.1.6SkipList
+
+![截屏2024-05-20 16.14.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.14.30.png)
+
+不同节点层级不一样
+
+![截屏2024-05-20 16.17.53](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.17.53.png)
+
+![截屏2024-05-20 16.18.59](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.18.59.png)
+
+![截屏2024-05-20 16.19.21](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.19.21.png)
+
+### 4.1.7RedisObject
+
+![截屏2024-05-20 16.23.39](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.23.39.png)
+
+**一个集合使用一个对象头 存储大量数据，这些数据单独如用string存储会在对象头上浪费大量空间**
+
+![截屏2024-05-20 16.24.40](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.24.40.png)
+
+![截屏2024-05-20 16.25.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.25.46.png)
+
+
+
+
+
+### 4.1.8五种数据结构
+
+#### 4.1.8.1String
+
+![截屏2024-05-20 16.55.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.55.48.png)
+
+![截屏2024-05-20 16.55.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.55.57.png)
+
+**44字节，整个内存刚好为64字节，符合redis内部内存分片的规则(2的n次方)**
+
+**不会产生内存碎片**
+
+使用String 尽量不超过44字节
+
+![截屏2024-05-20 16.58.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.58.42.png)
+
+![截屏2024-05-20 16.59.34](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2016.59.34.png)
+
+![截屏2024-05-20 17.01.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.01.00.png)
+
+#### 4.1.8.2List
+
+![截屏2024-05-20 17.03.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.03.35.png)
+
+![截屏2024-05-20 17.04.56](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.04.56.png)
+
+![截屏2024-05-20 17.11.11](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.11.11.png)
+
+![截屏2024-05-20 17.11.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.11.25.png)
+
+####   4.1.8.3Set
+
+![截屏2024-05-20 17.15.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.15.18.png)
+
+![截屏2024-05-20 17.20.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.20.44.png)
+
+**set每一次插入元素都会判断这个类型，以及时变更编码方式**
+
+![截屏2024-05-20 17.21.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.21.35.png)
+
+![截屏2024-05-20 17.24.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.24.03.png)
+
+![截屏2024-05-20 17.25.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.25.16.png)
+
+#### 4.1.8.4ZSet
+
+![截屏2024-05-20 17.29.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.29.57.png)
+
+![截屏2024-05-20 17.32.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.32.27.png)
+
+![截屏2024-05-20 17.34.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.34.36.png)
+
+![截屏2024-05-20 17.35.03](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.35.03.png)
+
+![截屏2024-05-20 17.37.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.37.05.png)
+
+![截屏2024-05-20 17.38.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.38.25.png)
+
+![截屏2024-05-20 17.41.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2017.41.27.png)
+
+#### 4.1.8.5Hash
+
+![截屏2024-05-20 19.06.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.06.17.png)
+
+![截屏2024-05-20 19.07.28](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.07.28.png)
+
+![截屏2024-05-20 19.08.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.08.04.png)
+
+
+
+![截屏2024-05-20 19.08.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.08.57.png)
+
+![截屏2024-05-20 19.09.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.09.41.png)
+
+![截屏2024-05-20 19.11.56](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.11.56.png)
+
+![截屏2024-05-20 19.13.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.13.50.png)
+
+![截屏2024-05-20 19.15.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2019.15.36.png)
+
+**ziplist不要搞太大**
+
+## 4.2网络模型
+
+### 4.2.1用户空间和内核空间
+
+**ubuntu 和 centos是linux的发行版**
+
+**用户应用通过ubuntu / centos 操作linux内核来访问计算机硬件**
+
+![截屏2024-05-20 20.55.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2020.55.30.png)
+
+**内核(操作系统)本质也是一个应用也要占用内存**
+
+32位的操作系统的内存最大值为2 ^ 32
+
+![截屏2024-05-20 21.40.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.40.46.png)
+
+![截屏2024-05-20 21.42.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.42.42.png)
+
+**linux IO模型用户进程的两个阶段**
+
+1. **等待数据准备就绪**：这是IO操作的第一阶段。在这个阶段，用户进程会等待数据从外部设备（如磁盘、网络等）传输到内核缓冲区。在这个过程中，根据具体的IO模型（如阻塞IO、非阻塞IO等），用户进程可能会处于阻塞状态（即等待数据到达而不进行其他操作）或非阻塞状态（即可以在等待过程中进行其他操作）。
+2. **将数据从内核态拷贝到用户态**：当数据在内核缓冲区准备就绪后，用户进程需要将这些数据从内核空间拷贝到用户空间（即应用程序的缓冲区）。这也是IO操作的第二阶段。在这个过程中，同样根据具体的IO模型，用户进程可能会处于阻塞状态或非阻塞状态。
+
+### 4.2.2阻塞IO
+
+用户**读**的模型
+
+![截屏2024-05-20 21.45.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.45.48.png)
+
+![截屏2024-05-20 21.47.16](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.47.16.png)
+
+### 4.2.3非阻塞IO
+
+![截屏2024-05-20 21.49.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.49.49.png)
+
+**用户调用revform函数后 暂无数据的情况是 非阻塞的**
+
+**但是调用函数后，内核存在数据的情况下，内核拷贝数据到用户空间的过程中是阻塞状态![截屏2024-05-20 21.52.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2021.52.44.png)**
+
+### 4.2.4IO多路复用
+
+#### 4.2.4.1概述
+
+![截屏2024-05-20 22.01.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.01.50.png)
+
+**文件描述符**
+
+![截屏2024-05-20 22.04.37](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.04.37.png)
+
+理论上来说，这种模型两个阶段也都是阻塞的
+
+但是 select监听的多个FD 都没有数据就绪的概率非常低
+
+而且 一旦某一个(或多个)FD数据就绪，进程循环调用recvfrom来读取FD(数据一定存在) 效率高于非阻塞IO
+
+![截屏2024-05-20 22.08.29](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.08.29.png)
+
+#### 4.2.4.2select
+
+![截屏2024-05-20 22.16.57](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.16.57.png)
+
+**内核无法直接告诉用户空间哪些fd就绪，只能覆盖用户传入的rfds数组，用户再做一次遍历才能知道结果**
+
+![截屏2024-05-20 22.18.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.18.42.png)
+
+#### 4.2.4.3 poll
+
+![截屏2024-05-20 22.22.59](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.22.59.png)
+
+![截屏2024-05-20 22.23.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.23.44.png)
+
+#### 4.2.4.4epoll
+
+**epfd 唯一对应 eventpoll**
+
+![截屏2024-05-20 22.30.17](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.30.17.png)
+
+![截屏2024-05-20 22.34.27](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.34.27.png)
+
+
+
+#### 4.2.4.5事件通知机制
+
+![截屏2024-05-20 22.37.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.37.00.png)
+
+![截屏2024-05-20 22.38.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.38.48.png)
+
+**在将list_head中的数据添加到events中去之后，判断系统的事件通知机制，若为LT会判断数据是否会读完而重新加入到链表中去**
+
+**手动从ET实现LT的时候不能使用阻塞IO，不然会陷入死循环**
+
+
+
+LT反复通知可能导致系统性能下降
+
+在多线程背景下，LT可能使得过多线程获取到了list_head中的内容，过多浪费了系统资源(惊群)
+
+![截屏2024-05-20 22.44.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.44.46.png)
+
+#### 4.2.4.6web服务流程
+
+![截屏2024-05-20 22.49.25](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-20%2022.49.25.png)
+
+### 4.2.5信号驱动IO
+
+![截屏2024-05-21 16.45.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.45.18.png)
+
+### 4.2.6异步IO
+
+![截屏2024-05-21 16.47.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.47.35.png)
+
+![截屏2024-05-21 16.48.10](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.48.10.png)
+
+![截屏2024-05-21 16.50.47](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.50.47.png)
+
+### 4.2.7Redis网络模型
+
+#### 4.2.7.1Redis线程问题
+
+**对于redis到底是单线程还是多线程**
+
+- **如果仅仅是Redis的核心业务部分(命令处理) - 单线程**
+- **如果是整个redis - 多线程**
+
+![截屏2024-05-21 16.55.01](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.55.01.png)
+
+![截屏2024-05-21 16.56.12](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2016.56.12.png)
+
+#### 4.2.7.2Redis单线程网络模型
+
+![截屏2024-05-21 17.02.33](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.02.33.png)
+
+
+
+![截屏2024-05-21 17.26.38](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.26.38.png)
+
+![截屏2024-05-21 17.26.47](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.26.47.png)
+
+![截屏2024-05-21 17.30.24](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.30.24.png)
+
+![截屏2024-05-21 17.37.50](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.37.50.png)
+
+![截屏2024-05-21 17.38.00](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.38.00.png)
+
+**IO多复用 +  事件派发**
+
+![截屏2024-05-21 17.39.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.39.36.png)
+
+**redis单线程的瓶颈主要就是IO读写 -** 
+
+![截屏2024-05-21 17.43.35](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.43.35.png)
+
+**IO读速度受到网络，带宽的影响 效率低**
+
+## 4.3通信协议
+
+### 4.3.1RESP协议
+
+![截屏2024-05-21 17.59.30](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2017.59.30.png)
+
+![截屏2024-05-21 18.05.02](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.05.02.png)
+
+### 4.3.2Redis客户端
+
+![截屏2024-05-21 18.09.46](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.09.46.png)
+
+![截屏2024-05-21 18.10.20](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.10.20.png)
+
+![截屏2024-05-21 18.17.36](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.17.36.png)
+
+![截屏2024-05-21 18.19.42](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.19.42.png)
+
+![截屏2024-05-21 18.22.08](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.22.08.png)
+
+![截屏2024-05-21 18.23.20](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2018.23.20.png)
+
+
+
+## 4.4内存策略
+
+![截屏2024-05-21 19.55.48](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2019.55.48.png)
+
+### 4.4.1过期策略
+
+**expire关键字**
+
+![截屏2024-05-21 19.57.24](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2019.57.24.png)
+
+![截屏2024-05-21 19.59.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2019.59.41.png)
+
+![截屏2024-05-21 20.00.18](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.00.18.png)
+
+**过期key的删除策略**
+
+- 惰性删除
+- 周期删除
+
+![截屏2024-05-21 20.03.43](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.03.43.png)
+
+![截屏2024-05-21 20.07.44](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.07.44.png)
+
+![截屏2024-05-21 20.10.41](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.10.41.png)
+
+![截屏2024-05-21 20.12.14](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.12.14.png)
+
+### 4.4.2淘汰策略
+
+![截屏2024-05-21 20.18.05](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.18.05.png)
+
+**在任何命令之前进行内存的检查，尝试淘汰一部分内存**
+
+![截屏2024-05-21 20.18.54](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.18.54.png)
+
+![截屏2024-05-21 20.19.32](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.19.32.png)
+
+![截屏2024-05-21 20.21.12](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.21.12.png)
+
+![截屏2024-05-21 20.24.43](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.24.43.png)
+
+![截屏2024-05-21 20.37.49](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.37.49.png)
+
+ 
+
+eviction_pool 为样本 （一开始样本可能不准确，循环次数多了就接近于所有idleTime最大的元素了）
+
+这个池子中的元素会按照某种方式做一个升序排序，值越大的优先淘汰  -- idleTime
+
+![截屏2024-05-21 20.56.04](https://typora---------image.oss-cn-beijing.aliyuncs.com/%E6%88%AA%E5%B1%8F2024-05-21%2020.56.04.png)
+
+比较是否可以存入池子的时候，将待比较元素的idleTime和池子中最小的去做比较（池子满了的情况下）
